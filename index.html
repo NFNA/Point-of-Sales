@@ -382,7 +382,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // UTILITY & HELPER FUNCTIONS
     // =================================================================================
     
-    const formatCurrency = (amount) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(amount);
+    const formatCurrency = (amount) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(amount || 0);
     
     const showLoader = () => loadingOverlay.style.display = 'flex';
     const hideLoader = () => loadingOverlay.style.display = 'none';
@@ -640,79 +640,62 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     // =================================================================================
-    // API CALLS (Google Apps Script)
+    // API CALLS (Google Apps Script) - REVISED
     // =================================================================================
     const callAppsScript = async (action, payload) => {
         if (!SCRIPT_URL) {
             showToast('URL Google Apps Script belum diatur!', 'error');
             console.error("SCRIPT_URL is not set.");
-            hideLoader();
             return { success: false, message: 'URL Google Apps Script belum diatur!' };
         }
         
         showLoader();
         try {
-            const response = await fetch(SCRIPT_URL, {
+             const response = await fetch(SCRIPT_URL, {
                 method: 'POST',
-                mode: 'no-cors', // Changed to no-cors for simple POST requests to GAS
+                // mode: 'cors' is the default, but we'll be explicit.
+                // We are removing 'no-cors' as it was preventing us from reading the response.
                 headers: {
                   'Content-Type': 'text/plain;charset=utf-8',
                 },
-                body: JSON.stringify({ action, payload })
+                body: JSON.stringify({ action, payload }),
+                redirect: 'follow'
             });
-            
-            // For 'no-cors', we can't read the response, so we'll have to rely on a subsequent fetch or assume success
-            // A better approach is a full CORS response from GAS, but this is simpler
-            // Let's reload the data after any action that modifies it
-            return { success: true }; // Assume success for now
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            return result;
         } catch (error) {
             console.error('Error calling Apps Script:', error);
             showToast('Gagal terhubung ke backend.', 'error');
             console.log("Tips: Pastikan Google Apps Script sudah di-deploy ulang (Deploy > Manage deployments > Edit > New version > Deploy) dengan akses diatur ke 'Anyone'. Pastikan juga URL di variabel SCRIPT_URL sudah benar.");
             return { success: false, error: error.message };
         } finally {
-            // We reload data on every mutation action to get the latest state
-            if(action !== 'getInitialData'){
-                await loadInitialData();
-            }
             hideLoader();
         }
     };
 
     const loadInitialData = async () => {
-        showLoader();
-        try {
-            // A direct fetch to a GAS web app needs to be handled differently.
-            // A POST request often gets a redirect, which can be tricky.
-            // Let's construct a GET-like request in the URL for initial data load.
-             const getUrl = SCRIPT_URL + "?action=getInitialData";
-             const response = await fetch(getUrl, {
-                method: 'GET',
-                mode: 'cors',
-                redirect: 'follow'
-             });
-
-            if (!response.ok) {
-                 throw new Error(`Network response was not ok: ${response.statusText}`);
-            }
-
-            const result = await response.json();
+        const result = await callAppsScript('getInitialData');
+        if (result && result.success) {
+            products = result.data.products || [];
+            staff = result.data.staff || [];
+            transactions = result.data.transactions || [];
             
-            if (result && result.success) {
-                products = result.data.products || [];
-                staff = result.data.staff || [];
-                transactions = result.data.transactions || [];
-                
-                renderProducts();
-                renderCart();
-                renderAllDropdowns();
-                if(currentPage === 'dashboard') renderDashboard();
-            } else {
-                 throw new Error(result.message || 'Failed to parse initial data.');
-            }
-        } catch(error) {
-            console.error("Could not fetch from backend. Using mock data.", error);
-            showToast('Gagal memuat data, menggunakan data contoh.', 'error');
+            // Initial Render
+            renderProducts();
+            renderCart();
+            renderAllDropdowns();
+            // Render current page's content if it's not the default POS page
+            if(currentPage === 'dashboard') renderDashboard();
+            if(currentPage === 'stock') renderStockPage();
+            if(currentPage === 'staff') renderStaffPage();
+        } else {
+            console.error("Could not fetch from backend. Using mock data.", result ? result.message : 'No response');
+            showToast('Gagal memuat data dari server. Menampilkan data contoh.', 'error');
             products = [
                 { id: 'prod1', name: 'Kopi Susu Gula Aren', price: 18000, stock: 20, image: 'https://placehold.co/300x200/663300/FFFFFF?text=Kopi+Susu' },
                 { id: 'prod2', name: 'Croissant Cokelat', price: 22000, stock: 15, image: 'https://placehold.co/300x200/D2691E/FFFFFF?text=Croissant' },
@@ -725,13 +708,11 @@ document.addEventListener('DOMContentLoaded', () => {
             transactions = [];
             renderProducts();
             renderAllDropdowns();
-        } finally {
-            hideLoader();
         }
     };
     
     // =================================================================================
-    // EVENT HANDLERS & LOGIC
+    // EVENT HANDLERS & LOGIC - REVISED TO HANDLE DATA UPDATES
     // =================================================================================
     const switchPage = (pageName) => {
         currentPage = pageName;
@@ -757,6 +738,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         addProductBtn.style.display = (pageName === 'pos' || pageName === 'stock') ? 'flex' : 'none';
 
+        // Always render fresh data when switching pages
         if (pageName === 'stock') renderStockPage();
         if (pageName === 'staff') renderStaffPage();
         if (pageName === 'dashboard') renderDashboard();
@@ -810,7 +792,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const total = cart.reduce((sum, item) => {
             const product = products.find(p => p.id === item.id);
-            return sum + (product.price * item.quantity);
+            return sum + (product ? product.price * item.quantity : 0);
         }, 0);
 
         const transactionData = {
@@ -827,8 +809,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (result && result.success) {
             showToast('Transaksi berhasil!', 'success');
+            // Update state from server response
+            products = result.data.products;
+            transactions = result.data.transactions;
             cart = [];
             customerNameInput.value = '';
+
+            // Rerender UI
+            renderProducts();
             renderCart();
         } else {
             showToast(result.message || 'Gagal memproses transaksi.', 'error');
@@ -872,6 +860,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await callAppsScript(action, productData);
         
         if (result && result.success) {
+            products = result.data.products;
+            renderProducts();
+            if (currentPage === 'stock') renderStockPage();
             hideProductModal();
             showToast(`Produk berhasil ${id ? 'diperbarui' : 'ditambahkan'}!`, 'success');
         } else {
@@ -888,6 +879,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (confirm(`Apakah Anda yakin ingin menghapus produk ini?`)) {
             const result = await callAppsScript('deleteProduct', { id: productId });
             if (result && result.success) {
+                products = result.data.products;
+                renderProducts();
+                if (currentPage === 'stock') renderStockPage();
                 showToast('Produk berhasil dihapus.', 'success');
             } else {
                 showToast(result.message || 'Gagal menghapus produk.', 'error');
@@ -905,6 +899,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const staffData = { id: 'staff-' + Date.now(), name: newStaffName };
         const result = await callAppsScript('addStaff', staffData);
         if(result && result.success) {
+            staff = result.data.staff;
+            renderStaffPage();
+            renderAllDropdowns();
             newStaffNameInput.value = '';
             showToast('Staff berhasil ditambahkan.', 'success');
         } else {
@@ -916,6 +913,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (confirm(`Apakah Anda yakin ingin menghapus staff ini?`)) {
             const result = await callAppsScript('deleteStaff', { id: staffId });
             if (result && result.success) {
+                staff = result.data.staff;
+                renderStaffPage();
+                renderAllDropdowns();
                 showToast('Staff berhasil dihapus.', 'success');
             } else {
                 showToast(result.message || 'Gagal menghapus staff.', 'error');
@@ -935,8 +935,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await callAppsScript('updateStock', payload);
 
         if (result && result.success) {
+            products = result.data.products;
+            renderStockPage();
+            if(currentPage === 'pos') renderProducts();
             showToast('Stok berhasil diperbarui.', 'success');
-            input.value = ''; // Clear input after success
+            input.value = '';
         } else {
              showToast(result.message || 'Gagal memperbarui stok.', 'error');
         }
@@ -966,6 +969,8 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const result = await callAppsScript('updateTransaction', payload);
         if(result && result.success){
+            transactions = result.data.transactions;
+            renderDashboard();
             editTransactionModal.classList.add('hidden');
             showToast('Transaksi berhasil diperbarui.', 'success');
         } else {
@@ -974,10 +979,14 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.handleDeleteTransaction = async (transactionId) => {
-        if(confirm('Apakah Anda yakin ingin menghapus transaksi ini? Aksi ini tidak dapat dibatalkan.')){
+        if(confirm('Apakah Anda yakin ingin menghapus transaksi ini? Aksi ini akan mengembalikan stok produk terkait.')){
             const result = await callAppsScript('deleteTransaction', { id: transactionId });
             if(result && result.success){
-                showToast('Transaksi berhasil dihapus.', 'success');
+                products = result.data.products;
+                transactions = result.data.transactions;
+                renderDashboard();
+                renderProducts(); // Re-render products in case stock changed
+                showToast('Transaksi berhasil dihapus & stok dikembalikan.', 'success');
             } else {
                  showToast(result.message || 'Gagal menghapus transaksi.', 'error');
             }
@@ -993,7 +1002,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('click', function(event) {
         const openMenus = document.querySelectorAll('[id^="menu-"]:not(.hidden)');
         openMenus.forEach(menu => {
-            if (!menu.parentElement.contains(event.target)) {
+            const button = menu.previousElementSibling;
+            if (!button.contains(event.target)) {
                 menu.classList.add('hidden');
             }
         });
